@@ -774,6 +774,32 @@ WHERE RowNum = 1;
 });
 
 
+router.get('/api/dashboard/server_test', async (req, res) => {
+    try {
+        const pool = await getMssqlPool();
+        const result = await pool.request().query(`SELECT COUNT(*) as 'total_reg_year'
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
+    WHERE YEAR(REG_DATE) = '2025'`);
+        //res.json(result.recordset);
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/dashboard/year_regActual");
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] failed: /api/dashboard/year_regActual " + err.message);
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
 // end BMA (PRIME-GO) query
 
 module.exports = router;
