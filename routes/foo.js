@@ -9,8 +9,85 @@ const express = require('express');
 const { getMssqlPool } = require('../db/mssql');
 const { getOraclePool } = require('../db/oracle');
 const { parse } = require('dotenv');
+const { Client } = require('ldapts');
+// const jwt = require('jsonwebtoken');
+// const crypto = require('crypto');
 
 const router = express.Router();
+
+
+const algorithm = 'aes-256-gcm';
+const key = Buffer.from(process.env.ENCRYPTION_KEY, 'hex');
+// const JWT_SECRET = process.env.JWT_SECRET || 'your_fallback_super_secret_key';
+
+router.post('/login-direct', async (req, res) => {
+    let { username, password } = req.body;
+
+    // 1. Check if username or password are empty strings
+    if (!username || !password) {
+        return res.status(400).json({
+            success: false,
+            message: 'Username and password are required'
+        });
+    }
+
+    // Clean spaces and check for the domain suffix
+    username = username.trim();
+    const domain = '@perodua.com.my';
+
+    if (!username.toLowerCase().endsWith(domain)) {
+        username = `${username}${domain}`;
+    }
+
+    const pass_decrypt = password;
+
+    const client = new Client({
+        url: 'ldap://perodua.com.my',
+        imeout: 5000,          // Prevents the request from hanging forever if LDAP is down
+        connectTimeout: 5000
+    });
+    try {
+        await client.bind(username, pass_decrypt);
+        console.log(`Direct LDAP login successful for: ${username}`);
+
+        const { searchEntries } = await client.search(
+            'DC=perodua,DC=com,DC=my',
+            {
+                scope: 'sub',
+                //filter: '(sAMAccountName=firdaus.rashid)',
+                filter: `(mail=${username})`,
+            }
+        );
+
+        // Close connection before sending successful response
+        await client.unbind();
+
+        return res.json({
+            success: true,
+            message: 'Login successful',
+            user: searchEntries
+        });
+
+    } catch (err) {
+        console.error('Invalid credentials or LDAP connection error:', err.message || err);
+
+        // 5. Attempt clean unbind layout inside catch block to avoid unhandled crashes
+        try {
+            await client.unbind();
+        } catch (unbindErr) {
+            // Silently suppress if connection was already dead
+        }
+
+        return res.status(401).json({
+            success: false,
+            message: 'Invalid credentials',
+            error: err.message || 'Unauthorized'
+        });
+    } /* finally {
+        await client.unbind();
+    } */
+});
+
 
 router.get('/from-mssql', async (req, res) => {
     try {
@@ -431,7 +508,7 @@ SELECT
         WHEN 'EM'  THEN 'East Malaysia'
         WHEN 'N'   THEN 'Northern'
         WHEN 'S'   THEN 'Southern'
-        WHEN 'FMD' THEN 'FMD Region' -- Maps code to descriptive name
+        WHEN 'FMD' THEN 'FMD' -- Maps code to descriptive name
         ELSE ISNULL(t.[REGION], a.[REGION]) 
     END AS REGION_NAME,
 
@@ -648,7 +725,293 @@ ORDER BY REG_PCTG_2 DESC;
 `);
         //res.json(result.recordset);
 
+        // To change 'Veh Br - ' to 'PSSB' 
+        const updatedRecords = result.recordset.map(item => {
+            if (item.OUTLET_NAME && item.OUTLET_NAME.startsWith('Veh Br-')) {
+                return {
+                    ...item,
+                    OUTLET_NAME: item.OUTLET_NAME.replace('Veh Br-', 'PSSB ')
+                };
+            }
+            return item;
+        });
+
         console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/registration/mnt_listRegionOutlet Params: " + JSON.stringify(req.query));
+
+
+
+
+        // Ori
+        /* res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        }); */
+
+
+        // Modified JSON
+        res.status(200).json({
+            success: true,
+            count: updatedRecords.length,
+            data: updatedRecords
+        });
+
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+
+// List actual monthly registration by month (Outlets)
+router.get('/api/registration/mnt_listModelOutlet', async (req, res) => {
+    try {
+        const { month, year, region, outletcode } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedRegion = region || 'C1';
+        const parsedOutletCode = outletcode || '522105';
+
+        // console.log(parsedRegion);
+
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).input('regionParam', parsedRegion).input('outletCodeParam', parsedOutletCode).query(`
+WITH TargetData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        TR2.[Outlet Code] AS OUTLET_CODE,
+        TR2.Model AS [MODEL],
+        SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_REG_COUNT
+    FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON TR2.[Outlet Code] = OTL2.SLS_CODE 
+    WHERE TR2.Parameter = 'New Car Reg' 
+      AND TR2.Month = @monthParam
+      AND TR2.Year = @yearParam
+      AND OTL2.OUTLET_ACTIVE = 'Active'
+      AND TR2.[Outlet Code] = @outletCodeParam
+      AND TR2.Model <> 'AXIA E'
+    GROUP BY OTL2.Region_2, TR2.[Outlet Code], TR2.Model
+),
+ActualData AS (
+    SELECT 
+        t.[REGION],
+        t.OUTLET_CODE,
+        t.[MODEL],
+        -- 1. Safely extract SALES_CENTER_NAME matching your criteria
+        ISNULL((
+            SELECT TOP 1 AC2.SALES_CENTER_NAME
+            FROM DM_BRONZE.CRKPI.CRMDB_New_Car_Reg AC2
+            WHERE MONTH(AC2.REG_DATE) = @monthParam 
+              AND YEAR(AC2.REG_DATE) = @yearParam
+              AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
+              AND AC2.SALES_CENTER_NAME IS NOT NULL
+        ), 'No Name Registered') AS OUTLET_NAME,
+        -- 2. Safely extract execution count
+        (
+            SELECT COUNT(*) 
+            FROM DM_BRONZE.CRKPI.CRMDB_New_Car_Reg AC2
+            WHERE MONTH(AC2.REG_DATE) = @monthParam 
+              AND YEAR(AC2.REG_DATE) = @yearParam
+              AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
+              AND AC2.JPJ_MODEL_DESCRIPTION LIKE '%' + t.[MODEL] + '%'
+              AND AC2.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
+        ) AS REG_COUNT
+    FROM TargetData t
+)
+SELECT 
+    ISNULL(a.[REGION], t.[REGION]) AS [REGION],
+    ISNULL(a.OUTLET_CODE, t.OUTLET_CODE) AS OUTLET_CODE,
+    ISNULL(a.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
+    ISNULL(t.[MODEL], a.[MODEL]) AS [MODEL],
+    ISNULL(t.TARGET_REG_COUNT, 0) AS TARGET_REG_COUNT,
+    ISNULL(a.REG_COUNT, 0) AS ACTUAL_REG_COUNT,
+    
+    -- 1. No Decimal Places (rounded to nearest integer)
+    CASE 
+        WHEN ISNULL(t.TARGET_REG_COUNT, 0) = 0 THEN 0
+        ELSE CAST(ROUND((ISNULL(a.REG_COUNT, 0) * 100.0) / t.TARGET_REG_COUNT, 0) AS INT)
+    END AS REG_PCTG,
+
+    -- 2. One Decimal Place
+    CASE 
+        WHEN ISNULL(t.TARGET_REG_COUNT, 0) = 0 THEN 0.0
+        ELSE CAST((ISNULL(a.REG_COUNT, 0) * 100.0) / t.TARGET_REG_COUNT AS DECIMAL(10,1))
+    END AS REG_PCTG_1,
+
+    -- 3. Two Decimal Places
+    CASE 
+        WHEN ISNULL(t.TARGET_REG_COUNT, 0) = 0 THEN 0.00
+        ELSE CAST((ISNULL(a.REG_COUNT, 0) * 100.0) / t.TARGET_REG_COUNT AS DECIMAL(10,2))
+    END AS REG_PCTG_2
+
+FROM TargetData t
+FULL OUTER JOIN ActualData a 
+    ON t.OUTLET_CODE = a.OUTLET_CODE AND t.[MODEL] = a.[MODEL]
+ORDER BY REG_PCTG_2 DESC;
+`);
+        //res.json(result.recordset);
+
+        // To change 'Veh Br - ' to 'PSSB' 
+        const updatedRecords = result.recordset.map(item => {
+            if (item.OUTLET_NAME && item.OUTLET_NAME.startsWith('Veh Br-')) {
+                return {
+                    ...item,
+                    OUTLET_NAME: item.OUTLET_NAME.replace('Veh Br-', 'PSSB ')
+                };
+            }
+            return item;
+        });
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/registration/mnt_listModelOutlet Params: " + JSON.stringify(req.query));
+
+
+
+
+        // Ori
+        /* res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        }); */
+
+
+        // Modified JSON
+        res.status(200).json({
+            success: true,
+            count: updatedRecords.length,
+            data: updatedRecords
+        });
+
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+
+// List actual model monthly registration by month bu outlet
+router.get('/api/registration/mnt_outletModelResult', async (req, res) => {
+    try {
+
+        const { month, year, region, outletcode } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedRegion = region || 'C1';
+        const parsedOutletCode = outletcode || '522105';
+
+        // console.log(parsedRegion);
+
+        // To calculate query time taken
+        const startTime = performance.now();
+
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).input('regionParam', parsedRegion).input('outletCodeParam', parsedOutletCode).query(`
+WITH TargetData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        TR2.[Outlet Code] AS OUTLET_CODE,
+        TR2.Model AS [MODEL],
+        SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_REG_COUNT
+    FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON TR2.[Outlet Code] = OTL2.SLS_CODE 
+    WHERE TR2.Parameter = 'New Car Reg' 
+      AND TR2.Month = @monthParam 
+      AND TR2.Year = @yearParam
+      AND OTL2.OUTLET_ACTIVE = 'Active'
+      AND TR2.[Outlet Code] = @outletCodeParam
+      AND TR2.Model <> 'AXIA E'
+    GROUP BY OTL2.Region_2, TR2.[Outlet Code], TR2.Model
+),
+ActualData AS (
+    SELECT 
+        t.[REGION],
+        t.OUTLET_CODE,
+        t.[MODEL],
+        t.TARGET_REG_COUNT,
+        (
+            SELECT COUNT(*) 
+            FROM DM_BRONZE.CRKPI.CRMDB_New_Car_Reg AC2
+            WHERE MONTH(AC2.REG_DATE) = @monthParam 
+              AND YEAR(AC2.REG_DATE) = @yearParam
+              AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
+              AND AC2.JPJ_MODEL_DESCRIPTION LIKE '%' + t.[MODEL] + '%'
+              AND AC2.JPJ_MODEL_DESCRIPTION <> 'AXIA - 1000 E (MANUAL)'
+        ) AS REG_COUNT
+    FROM TargetData t
+),
+CalculatedData AS (
+    SELECT 
+        OUTLET_CODE,
+        [MODEL],
+        TARGET_REG_COUNT,
+        REG_COUNT,
+        CASE 
+            WHEN TARGET_REG_COUNT = 0 THEN 0.0
+            ELSE (REG_COUNT * 100.0) / TARGET_REG_COUNT
+        END AS REG_PCTG
+    FROM ActualData
+),
+SummaryData AS (
+    SELECT 
+        OUTLET_CODE, -- Hardcoded to match your WHERE filter cleanly
+        COUNT(*) AS TOTAL_ROWS,
+        SUM(CASE WHEN REG_PCTG < 50 THEN 1 ELSE 0 END) AS ROWS_BELOW_50,
+        
+        -- 0 Decimal Places (Rounded)
+        CAST(ROUND(AVG(REG_PCTG), 0) AS INT) AS AVERAGE_REG_PCTG,
+        
+        -- 1 Decimal Place
+        CAST(AVG(REG_PCTG) AS DECIMAL(10,1)) AS AVERAGE_REG_PCTG_1,
+        
+        -- 2 Decimal Places
+        CAST(AVG(REG_PCTG) AS DECIMAL(10,2)) AS AVERAGE_REG_PCTG_2,
+        
+        (SELECT TOP 1 [MODEL] FROM CalculatedData ORDER BY REG_PCTG ASC, [MODEL] ASC) AS LOWEST_MODEL
+        
+    FROM CalculatedData
+    GROUP BY OUTLET_CODE
+)
+-- Fetch the name exactly once at the end to keep query cost low
+SELECT 
+    s.OUTLET_CODE,
+    ISNULL((
+        SELECT TOP 1 AC2.SALES_CENTER_NAME
+        FROM DM_BRONZE.CRKPI.CRMDB_New_Car_Reg AC2
+        WHERE MONTH(AC2.REG_DATE) = @monthParam  
+          AND YEAR(AC2.REG_DATE) = @yearParam
+          AND AC2.SALES_CENTER_CODE = s.OUTLET_CODE
+          AND AC2.SALES_CENTER_NAME IS NOT NULL
+    ), 'No Name Registered') AS OUTLET_NAME,
+    s.TOTAL_ROWS,
+    s.ROWS_BELOW_50,
+    s.AVERAGE_REG_PCTG,
+    s.AVERAGE_REG_PCTG_1,
+    s.AVERAGE_REG_PCTG_2,
+    s.LOWEST_MODEL
+FROM SummaryData s;
+`);
+        //res.json(result.recordset);
+
+        // Calculate the duration
+        const duration = (performance.now() - startTime).toFixed(2)
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/mnt_outletModelResult Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -663,7 +1026,6 @@ ORDER BY REG_PCTG_2 DESC;
     }
 
 });
-
 
 
 // List actual monthly registration by month (Outlets)
