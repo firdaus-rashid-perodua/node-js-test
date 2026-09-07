@@ -8,6 +8,7 @@ http://10.60.22.62/get-users
 const express = require('express');
 const { getMssqlPool } = require('../db/mssql');
 const { getOraclePool } = require('../db/oracle');
+const oracledb = require('oracledb');
 const { parse } = require('dotenv');
 const { Client } = require('ldapts');
 // const jwt = require('jsonwebtoken');
@@ -19,6 +20,17 @@ const router = express.Router();
 const algorithm = 'aes-256-gcm';
 const key = Buffer.from(process.env.ENCRYPTION_KEY, 'hex');
 // const JWT_SECRET = process.env.JWT_SECRET || 'your_fallback_super_secret_key';
+
+// ORACLE DATE FORMATTER
+const formatter = new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+});
+
+const formatOracleDate = (date) =>
+    formatter.format(date).replace(/[\s,]+/g, '-').toUpperCase();
+// END ORACLE DATE FORMATTER
 
 router.post('/login-direct', async (req, res) => {
     let { username, password } = req.body;
@@ -130,10 +142,13 @@ router.get('/from-oracle', async (req, res) => {
         const conn = await pool.getConnection();
 
         const result = await conn.execute(`
-      select userid, username from users
-      where groupid = 'ITSTF'
-      and userstatus = 'ACT'
-    `);
+            select userid, username from users
+            where groupid = 'ITSTF'
+            and userstatus = 'ACT'
+            `,
+            [], // Bind variables (empty array since you don't have any)
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
 
         await conn.close();
         //res.json(result.rows);
@@ -173,13 +188,15 @@ router.get('/test/get-users', async (req, res) => {
 // start BMA (PRIME-GO) query
 router.get('/api/dashboard/year_regActual', async (req, res) => {
     try {
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT COUNT(*) as 'total_reg_year'
     FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
     WHERE YEAR(REG_DATE) = '2025'`);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/dashboard/year_regActual");
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/year_regActual");
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -199,14 +216,16 @@ router.get('/api/dashboard/year_regActual', async (req, res) => {
 
 router.get('/api/dashboard/year_regTarget', async (req, res) => {
     try {
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT SUM(Target) as 'target_reg_year'
     FROM [DM_BRONZE].[CRKPI].[FlatFile_Target]
     WHERE  YEAR = '2025'
     AND Parameter = 'New Car Reg'`);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/dashboard/year_regTarget");
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/year_regTarget");
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -229,12 +248,10 @@ router.get('/api/dashboard/mnt_regActual', async (req, res) => {
         // 1. Get query parameters from the request URL
         const { month, year } = req.query;
 
-        // Fallback defaults if parameters are missing from the URL call
-        // const queryMonth = month || '05';
-        // const queryYear = year || '2025';
         const parsedMonth = parseInt(month, 10) || '05';
         const parsedYear = parseInt(year, 10) || '2025';
 
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).query(`SELECT COUNT(*) as 'total_reg_month'
@@ -242,9 +259,10 @@ router.get('/api/dashboard/mnt_regActual', async (req, res) => {
     WHERE MONTH(REG_DATE) = @monthParam
       AND YEAR(REG_DATE) = @yearParam`);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/dashboard/mnt_regActual  Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/mnt_regActual  Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -272,6 +290,7 @@ router.get('/api/dashboard/mnt_regTarget', async (req, res) => {
         const parsedMonth = parseInt(month, 10) || '05';
         const parsedYear = parseInt(year, 10) || '2025';
 
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).query(`SELECT ISNULL(SUM(Target), 0) as 'target_reg_month'
@@ -281,8 +300,9 @@ WHERE YEAR = @yearParam
   --AND REGION = 'C1'
   AND Parameter = 'New Car Reg'`);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2)
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/dashboard/mnt_regTarget Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/mnt_regTarget Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -470,6 +490,7 @@ router.get('/api/registration/mnt_listActual', async (req, res) => {
         const parsedMonth = parseInt(month, 10) || '05';
         const parsedYear = parseInt(year, 10) || '2025';
 
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).query(`
@@ -543,8 +564,9 @@ ORDER BY
     ISNULL(t.[REGION], a.[REGION]) ASC;
 `);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/registration/mnt_listActual");
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/mnt_listActual  Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -569,6 +591,7 @@ router.get('/api/registration/mnt_listActualModel', async (req, res) => {
         const parsedMonth = parseInt(month, 10) || '05';
         const parsedYear = parseInt(year, 10) || '2025';
 
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).query(`
@@ -630,8 +653,9 @@ LEFT JOIN RegistrationSummary r ON t.Model = r.Model
 ORDER BY ACTUAL_REG_COUNT DESC;
 `);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/registration/mnt_listActualModel");
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/mnt_listActualModel  Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -660,6 +684,7 @@ router.get('/api/registration/mnt_listRegionOutlet', async (req, res) => {
 
         // console.log(parsedRegion);
 
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).input('regionParam', parsedRegion).query(`
@@ -724,6 +749,7 @@ FULL OUTER JOIN ActualData a
 ORDER BY REG_PCTG_2 DESC;
 `);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
         // To change 'Veh Br - ' to 'PSSB' 
         const updatedRecords = result.recordset.map(item => {
@@ -736,7 +762,7 @@ ORDER BY REG_PCTG_2 DESC;
             return item;
         });
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/registration/mnt_listRegionOutlet Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/mnt_listRegionOutlet Params: " + JSON.stringify(req.query));
 
 
 
@@ -780,6 +806,7 @@ router.get('/api/registration/mnt_listModelOutlet', async (req, res) => {
 
         // console.log(parsedRegion);
 
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).input('regionParam', parsedRegion).input('outletCodeParam', parsedOutletCode).query(`
@@ -858,6 +885,7 @@ FULL OUTER JOIN ActualData a
 ORDER BY REG_PCTG_2 DESC;
 `);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
         // To change 'Veh Br - ' to 'PSSB' 
         const updatedRecords = result.recordset.map(item => {
@@ -870,7 +898,7 @@ ORDER BY REG_PCTG_2 DESC;
             return item;
         });
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/registration/mnt_listModelOutlet Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/mnt_listModelOutlet Params: " + JSON.stringify(req.query));
 
 
 
@@ -1039,6 +1067,7 @@ router.get('/api/registration/mnt_RegionOutletSummary', async (req, res) => {
 
         // console.log(parsedRegion);
 
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).input('regionParam', parsedRegion).query(`
@@ -1118,8 +1147,9 @@ FROM RankedResults
 WHERE RowNum = 1;
 `);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/registration/mnt_RegionOutletSummary Params: " + JSON.stringify(req.query));
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/mnt_RegionOutletSummary Params: " + JSON.stringify(req.query));
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -1138,13 +1168,15 @@ WHERE RowNum = 1;
 
 router.get('/api/dashboard/server_test', async (req, res) => {
     try {
+        const startTime = performance.now();
         const pool = await getMssqlPool();
         const result = await pool.request().query(`SELECT COUNT(*) as 'total_reg_year'
     FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
     WHERE YEAR(REG_DATE) = '2025'`);
         //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
 
-        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success: /api/dashboard/year_regActual");
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/year_regActual");
         res.status(200).json({
             success: true,
             count: result.recordset.length,
@@ -1160,6 +1192,664 @@ router.get('/api/dashboard/server_test', async (req, res) => {
     }
 
 });
+
+
+
+// Booking
+
+router.get('/api/dashboard/mnt_bkgActual', async (req, res) => {
+    try {
+
+        // 1. Get query parameters from the request URL
+        const { month, year } = req.query;
+
+        // Fallback defaults if parameters are missing from the URL call
+        // const queryMonth = month || '05';
+        // const queryYear = year || '2025';
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        // To calculate query time taken
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+SELECT 
+    total_bkg_month_br,
+    total_bkg_month_dlr,
+    (total_bkg_month_br + total_bkg_month_dlr) AS total_bkg_month
+FROM (
+    SELECT 
+        (SELECT COUNT(*) 
+         FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch]
+         WHERE BOOKING_STATUS = 'BOOK'
+           AND MONTH(BOOKING_DATE) = @monthParam
+           AND YEAR(BOOKING_DATE) = @yearParam) AS [total_bkg_month_br],
+           
+        (SELECT COUNT(*) 
+         FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer]
+         WHERE MONTH(BOOKINGDATE) = @monthParam
+           AND YEAR(BOOKINGDATE) = @yearParam) AS [total_bkg_month_dlr]
+) AS [SourceData];
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2)
+
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/mnt_bkgActual  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] failed: /api/dashboard/mnt_bkgActual " + err.message);
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+
+//booking target
+router.get('/api/dashboard/mnt_bkgTarget', async (req, res) => {
+    try {
+
+        const { month, year } = req.query;
+
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+                SELECT TO_NUMBER(sectionvalue) as target_bkg_month
+                FROM bma_configuration_master
+                WHERE configtype = 'BKG_TARGET'
+                AND recordstatus = 'E'
+                AND attr1 = :month
+                AND attr2 = :year
+            `,
+            {
+                month: parsedMonth,
+                year: parsedYear
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/mnt_bkgTarget  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+
+//booking List
+router.get('/api/booking/mnt_ListActual2', async (req, res) => {
+    try {
+
+        // 1. Get query parameters from the request URL
+        const { month, year } = req.query;
+
+        // Fallback defaults if parameters are missing from the URL call
+        // const queryMonth = month || '05';
+        // const queryYear = year || '2025';
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        // To calculate query time taken
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+WITH CombinedBookings AS (
+    -- 1. Dealer Bookings
+    SELECT 
+        TR2.compcode AS center_code, 
+        OTL2.REGION_2--,OTL2.REGION
+    FROM DM_BRONZE.crkpi.[CRMDB_Booking_Dealer] TR2 
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON TR2.compcode = OTL2.SLS_CODE 
+    WHERE MONTH(TR2.BOOKINGDATE) = @monthParam
+        AND YEAR(TR2.BOOKINGDATE) = @yearParam
+
+    UNION ALL -- Use UNION ALL to make sure you count every single row
+
+    -- 2. Branch Bookings
+    SELECT 
+        ACT1.sales_center_code AS center_code, 
+        OTL2.REGION_2--,OTL2.REGION
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] ACT1
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON ACT1.sales_center_code = OTL2.SLS_CODE 
+    WHERE ACT1.BOOKING_STATUS = 'BOOK'
+        AND MONTH(ACT1.BOOKING_DATE) = @monthParam
+        AND YEAR(ACT1.BOOKING_DATE) = @yearParam
+)
+-- 3. Final Aggregation
+SELECT 
+    REGION_2 as 'REGION',
+        -- New Descriptive Region Column (Added FMD label map)
+    CASE ISNULL(REGION_2, REGION_2)
+        WHEN 'C1'  THEN 'Central 1'
+        WHEN 'C2'  THEN 'Central 2'
+        WHEN 'EC1' THEN 'East Coast 1'
+        WHEN 'EC2' THEN 'East Coast 2'
+        WHEN 'EM'  THEN 'East Malaysia'
+        WHEN 'N'   THEN 'Northern'
+        WHEN 'S'   THEN 'Southern'
+        WHEN 'FMD' THEN 'FMD' -- Maps code to descriptive name
+        ELSE ISNULL(REGION_2, REGION_2)
+    END AS REGION_NAME,
+    COUNT(center_code) AS 'ACTUAL_BKG_COUNT'
+FROM CombinedBookings
+GROUP BY REGION_2--, REGION
+ORDER BY 
+    CASE WHEN REGION_2 = 'FMD' THEN 1 ELSE 0 END ASC,
+    REGION_2 ASC;;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2)
+
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/mnt_bkgActual  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] failed: /api/dashboard/mnt_bkgActual " + err.message);
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+router.get('/api/booking/mnt_ListActual', async (req, res) => {
+    let oracleConn;
+    try {
+        const { month, year } = req.query;
+
+        // Maintain string versions for Oracle attributes and integers for MSSQL functions
+        const stringMonth = month || '05';
+        const stringYear = year || '2025';
+        const intMonth = parseInt(stringMonth, 10);
+        const intYear = parseInt(stringYear, 10);
+
+        const startTime = performance.now();
+
+        // ==========================================
+        // STEP 1: FETCH TARGET DATA FROM ORACLE
+        // ==========================================
+        const oraclePool = await getOraclePool();
+        oracleConn = await oraclePool.getConnection();
+        const oracleResult = await oracleConn.execute(`
+                SELECT 
+                    attr3 as region_code, -- Assuming your ATTR3 contains the 'C1', 'C2' codes to map safely
+                    TO_NUMBER(sectionvalue) as target_bkg_month
+                FROM bma_configuration_master
+                WHERE configtype = 'TGT_OUTLET'
+                AND sectionname = 'BKG_TARGET_OUTLET'
+                AND recordstatus = 'E'
+                AND attr1 = :month
+                AND attr2 = :year
+            `,
+            { month: stringMonth, year: stringYear },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await oracleConn.close();
+
+        // ==========================================
+        // STEP 2: FETCH ACTUAL DATA FROM MSSQL
+        // ==========================================
+        const mssqlPool = await getMssqlPool();
+        const mssqlResult = await mssqlPool.request()
+            .input('monthParam', intMonth)
+            .input('yearParam', intYear)
+            .query(`
+WITH CombinedBookings AS (
+    SELECT TR2.compcode AS center_code, OTL2.REGION_2
+    FROM DM_BRONZE.crkpi.[CRMDB_Booking_Dealer] TR2 
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 ON TR2.compcode = OTL2.SLS_CODE 
+    WHERE MONTH(TR2.BOOKINGDATE) = @monthParam AND YEAR(TR2.BOOKINGDATE) = @yearParam
+
+    UNION ALL 
+
+    SELECT ACT1.sales_center_code AS center_code, OTL2.REGION_2
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] ACT1
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 ON ACT1.sales_center_code = OTL2.SLS_CODE 
+    WHERE ACT1.BOOKING_STATUS = 'BOOK' AND MONTH(ACT1.BOOKING_DATE) = @monthParam AND YEAR(ACT1.BOOKING_DATE) = @yearParam
+)
+SELECT 
+    REGION_2 as 'REGION',
+    CASE REGION_2
+        WHEN 'C1'  THEN 'Central 1'
+        WHEN 'C2'  THEN 'Central 2'
+        WHEN 'EC1' THEN 'East Coast 1'
+        WHEN 'EC2' THEN 'East Coast 2'
+        WHEN 'EM'  THEN 'East Malaysia'
+        WHEN 'N'   THEN 'Northern'
+        WHEN 'S'   THEN 'Southern'
+        WHEN 'FMD' THEN 'FMD' 
+        ELSE REGION_2
+    END AS REGION_NAME,
+    COUNT(center_code) AS 'ACTUAL_BKG_COUNT'
+FROM CombinedBookings
+GROUP BY REGION_2
+ORDER BY 
+    CASE WHEN REGION_2 = 'FMD' THEN 1 ELSE 0 END ASC, REGION_2 ASC;
+`);
+
+        // ==========================================
+        // STEP 3: COMBINE DATA STREAMS & CALCULATE PERCENTAGES
+        // ==========================================
+        const combinedData = mssqlResult.recordset.map(mssqlRow => {
+            // Find a match inside Oracle records (node-oracledb properties are UPPERCASE)
+            const targetMatch = oracleResult.rows.find(
+                oracleRow => oracleRow.REGION_CODE === mssqlRow.REGION
+            );
+
+            const targetValue = targetMatch ? targetMatch.TARGET_BKG_MONTH : 0;
+            const actualValue = mssqlRow.ACTUAL_BKG_COUNT || 0;
+
+            // Calculate percentage safely to prevent division by zero errors
+            let percentage = 0;
+            if (targetValue > 0) {
+                percentage = (actualValue / targetValue) * 100;
+            }
+
+            return {
+                ...mssqlRow,
+                TARGET_BKG_COUNT: targetValue,
+                // Fixed format outputs as strings based on your precision requirements
+                BKG_PCTG: percentage.toFixed(0), // No decimal places
+                BKG_PCTG_1: percentage.toFixed(1), // 1 decimal point
+                BKG_PCTG_2: percentage.toFixed(2)  // 2 decimal points
+            };
+        });
+
+
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_ListActual  Params: " + JSON.stringify(req.query));
+
+        res.status(200).json({
+            success: true,
+            count: combinedData.length,
+            data: combinedData
+        });
+
+    } catch (err) {
+        if (oracleConn) {
+            try { await oracleConn.close(); } catch (e) { console.error(e); }
+        }
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] failed: /api/booking/mnt_ListActual " + err.message);
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed cross-platform',
+            error: err.message
+        });
+    }
+});
+
+
+router.get('/api/booking/mnt_ListActual_temp', async (req, res) => {
+    try {
+
+        const { month, year } = req.query;
+
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+SELECT 
+    btd.region_2 AS region,
+    CASE btd.region_2
+        WHEN 'C1'  THEN 'Central 1'
+        WHEN 'C2'  THEN 'Central 2'
+        WHEN 'EC1' THEN 'East Coast 1'
+        WHEN 'EC2' THEN 'East Coast 2'
+        WHEN 'EM'  THEN 'East Malaysia'
+        WHEN 'N'   THEN 'Northern'
+        WHEN 'S'   THEN 'Southern'
+        WHEN 'FMD' THEN 'FMD' 
+        ELSE btd.region_2
+    END AS region_name,
+    TO_NUMBER(COUNT(*)) AS actual_bkg_count, 
+    0 AS target_bkg_count, 
+    '0' AS bkg_pctg, 
+    '0.0' AS bkg_pctg_1, 
+    '0.00' AS bkg_pctg_2
+FROM ordermaster om, bma_temp_dealermaster btd
+WHERE om.bookingdate >= '1-jul-2025'
+  AND om.bookingdate < '1-aug-2025'
+  AND orderstatus NOT IN ('NEW','VOID')
+  AND om.compcode = btd.sls_code
+  AND (1=1 or 1 = :month)
+  AND (1=1 or 1 = :year)
+GROUP BY 
+    btd.region_2,
+    CASE btd.region_2
+        WHEN 'C1'  THEN 'Central 1'
+        WHEN 'C2'  THEN 'Central 2'
+        WHEN 'EC1' THEN 'East Coast 1'
+        WHEN 'EC2' THEN 'East Coast 2'
+        WHEN 'EM'  THEN 'East Malaysia'
+        WHEN 'N'   THEN 'Northern'
+        WHEN 'S'   THEN 'Southern'
+        WHEN 'FMD' THEN 'FMD' 
+        ELSE btd.region_2
+    END
+            `,
+            {
+                month: parsedMonth,
+                year: parsedYear
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/mnt_ListActual_temp  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+router.get('/api/booking/mnt_ListActual_ora', async (req, res) => {
+    try {
+
+        const { month, year } = req.query;
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+
+        const startDate = new Date(parsedYear, parsedMonth - 1, 1);
+        const endDate = new Date(parsedYear, parsedMonth, 1); // Automatically wraps to next month
+
+        // Call oracle date formatter
+        const parsedStartDate = formatOracleDate(startDate); // "1-MAY-2025"
+        const parsedEndDate = formatOracleDate(endDate);     // "1-JUN-2025"
+
+        // console.log(parsedStartDate);
+        // console.log(parsedEndDate);
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+SELECT 
+    region,
+    region_name,
+    SUM(actual_bkg_count) AS actual_bkg_count,
+    SUM(target_bkg_count) AS target_bkg_count,
+    0 AS bkg_pctg, 
+    0.0 AS bkg_pctg_1, 
+    0.00 AS bkg_pctg_2
+FROM (
+    -- QUERY 1: Branch
+    SELECT 
+        btd.region_2 AS region,
+        CASE btd.region_2
+            WHEN 'C1'  THEN 'Central 1'
+            WHEN 'C2'  THEN 'Central 2'
+            WHEN 'EC1' THEN 'East Coast 1'
+            WHEN 'EC2' THEN 'East Coast 2'
+            WHEN 'EM'  THEN 'East Malaysia'
+            WHEN 'N'   THEN 'Northern'
+            WHEN 'S'   THEN 'Southern'
+            WHEN 'FMD' THEN 'FMD' 
+            ELSE btd.region_2
+        END AS region_name, 
+        COUNT(*) AS actual_bkg_count,      
+        0 AS target_bkg_count
+    FROM sndsv_booking_details bdl, bma_temp_dealermaster btd
+    --WHERE EXTRACT(YEAR FROM bdl.firmed_booking_date) = :year
+    --  AND EXTRACT(MONTH FROM bdl.firmed_booking_date) = :month
+    WHERE bdl.firmed_booking_date >= :startDate
+      AND bdl.firmed_booking_date < :endDate
+      AND bdl.booking_status NOT IN ('TB','CB','WAIT')
+      AND bdl.sales_center_code = btd.sls_code
+    GROUP BY btd.region_2
+
+    UNION ALL
+
+    -- QUERY 2: Dealer
+    SELECT 
+        btd.region_2 AS region,
+        CASE btd.region_2
+            WHEN 'C1'  THEN 'Central 1'
+            WHEN 'C2'  THEN 'Central 2'
+            WHEN 'EC1' THEN 'East Coast 1'
+            WHEN 'EC2' THEN 'East Coast 2'
+            WHEN 'EM'  THEN 'East Malaysia'
+            WHEN 'N'   THEN 'Northern'
+            WHEN 'S'   THEN 'Southern'
+            WHEN 'FMD' THEN 'FMD' 
+            ELSE btd.region_2
+        END AS region_name,
+        COUNT(*) AS actual_bkg_count, 
+        0 AS target_bkg_count
+    FROM ordermaster om, bma_temp_dealermaster btd
+    -- WHERE EXTRACT(YEAR FROM om.bookingdate) = :year
+      -- AND EXTRACT(MONTH FROM om.bookingdate) = :month
+      -- AND EXTRACT(YEAR FROM om.orderdatetime) = :year
+      -- AND EXTRACT(MONTH FROM om.orderdatetime) = :month
+      WHERE om.bookingdate >= :startDate
+      AND om.bookingdate < :endDate
+      AND orderstatus NOT IN ('NEW','VOID')
+      AND om.compcode = btd.sls_code
+    GROUP BY btd.region_2
+)
+GROUP BY region, region_name
+ORDER BY region
+            `,
+            {
+                // month: parsedMonth,
+                // year: parsedYear,
+                startDate: parsedStartDate,
+                endDate: parsedEndDate,
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_ListActual_ora  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+
+router.get('/api/booking/mnt_listRegionOutlet_ora', async (req, res) => {
+    try {
+
+        const { month, year, region } = req.query;
+
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+        const parsedRegion = region || 'C1';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+select  btd.region_2 as region, sls_code as outlet_code, sls_comp_name as outlet_name,
+        count(*)  AS actual_bkg_count, 0 as target_bkg_count, 0 as bkg_pctg, 0.0 as bkg_pctg_1, 0.00 as bkg_pctg_2
+from ordermaster om, bma_temp_dealermaster btd
+WHERE EXTRACT(YEAR FROM om.bookingdate) = :year
+  AND EXTRACT(MONTH FROM om.bookingdate) = :month
+  AND EXTRACT(YEAR FROM om.orderdatetime) = :year
+  AND EXTRACT(MONTH FROM om.orderdatetime) = :month
+  AND om.orderstatus NOT IN ('NEW','VOID')
+  AND om.compcode = btd.sls_code
+  AND btd.region_2 = :region
+  GROUP BY btd.region_2, sls_code, sls_comp_name--, d.description
+UNION
+SELECT 
+    btd.region_2 AS region, btd.sls_code as outlet_code, btd.sls_comp_name,
+    COUNT(*) AS actual_bkg_count,      
+    0 as target_bkg_count, 0 as bkg_pctg, 0.0 as bkg_pctg_1, 0.00 as bkg_pctg_2
+FROM sndsv_booking_details bdl, bma_temp_dealermaster btd
+WHERE EXTRACT(YEAR FROM bdl.firmed_booking_date) = :year
+  AND EXTRACT(MONTH FROM bdl.firmed_booking_date) = :month
+  AND bdl.booking_status NOT IN ('TB','CB','WAIT')
+  AND bdl.sales_center_code = btd.sls_code
+  AND btd.region_2 = :region
+GROUP BY btd.region_2, sls_code, sls_comp_name
+ORDER BY ACTUAL_BKG_COUNT DESC
+            `,
+            {
+                month: parsedMonth,
+                year: parsedYear,
+                region: parsedRegion
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_listRegionOutlet_ora  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
+
+router.get('/api/booking/mnt_listModelOutlet_ora', async (req, res) => {
+    try {
+
+        const { month, year, outletcode } = req.query;
+
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+        const parsedOutletcode = outletcode || '522105';
+
+        const startDate = new Date(parsedYear, parsedMonth - 1, 1);
+        const endDate = new Date(parsedYear, parsedMonth, 1);
+
+        // Call oracle date formatter
+        const parsedStartDate = formatOracleDate(startDate); // "1-MAY-2025"
+        const parsedEndDate = formatOracleDate(endDate);     // "1-JUN-2025"
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+select  btd.region_2 as region, sls_code as outlet_code, sls_comp_name as outlet_name,
+        TRIM(REGEXP_REPLACE(d.description, 'PERODUA|\(NEW\)', '', 1, 0, 'i')) AS model, 
+        count(*)  AS actual_bkg_count, 0 as target_bkg_count, 0 as bkg_pctg, 0.0 as bkg_pctg_1, 0.00 as bkg_pctg_2
+from ordermaster om, bma_temp_dealermaster btd,
+        dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b, dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e 
+WHERE om.bookingdate >= :startDate
+  AND om.bookingdate < :endDate
+  AND om.orderstatus NOT IN ('NEW','VOID')
+  AND om.compcode = btd.sls_code
+  AND om.fmrid = a.id
+  AND a.vcl_code = b.vcl_code
+  AND a.fml_id = c.id
+  AND e.vfp_id = d.id
+  AND c.vfy_id = e.id 
+  --AND d.description like '%AXIA%'
+  AND d.code not in ('D87A')  --remove AXIA Rahmah (D87A)
+  AND om.compcode = :outletcode
+  GROUP BY btd.region_2, sls_code, sls_comp_name, d.description
+--  ORDER BY actual_bkg_count DESC
+UNION
+SELECT  btd.region_2 as region, sls_code as outlet_code, sls_comp_name as outlet_name,
+        TRIM(REGEXP_REPLACE(d.description, 'PERODUA|\\(NEW\\)', '', 1, 0, 'i')) AS model, 
+        count(*)  AS actual_bkg_count, 0 as target_bkg_count, 0 as bkg_pctg, 0.0 as bkg_pctg_1, 0.00 as bkg_pctg_2
+FROM    sndsv_booking_details bdl, bma_temp_dealermaster btd, dna.sndsd_family_model_colors a, dna.sndsd_vehicle_colors b,
+        dna.sndsd_family_models c, dna.sndsd_vehicle_family_groups d, dna.sndsd_vehicle_families e 
+WHERE bdl.sales_center_code = :outletcode
+AND bdl.sales_center_code = btd.sls_code
+AND bdl.booking_status = 'BOOK'
+AND bdl.firmed_booking_date >= :startDate
+AND bdl.firmed_booking_date < :endDate
+AND bdl.booking_status NOT IN ('TB','CB','WAIT')
+AND bdl.fmr_id = a.id
+AND a.fml_id = c.id
+AND e.vfp_id = d.id
+AND c.vfy_id = e.id 
+--AND d.description like '%AXIA%'
+AND d.code not in ('D87A')  --remove AXIA Rahmah (D87A)
+GROUP BY btd.region_2, sls_code, sls_comp_name, d.description
+ORDER BY actual_bkg_count DESC
+            `,
+            {
+                // month: parsedMonth,
+                // year: parsedYear,
+                outletcode: parsedOutletcode,
+                startDate: parsedStartDate,
+                endDate: parsedEndDate,
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_listModelOutlet_ora  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
 
 
 // end BMA (PRIME-GO) query
