@@ -21,6 +21,8 @@ const algorithm = 'aes-256-gcm';
 const key = Buffer.from(process.env.ENCRYPTION_KEY, 'hex');
 // const JWT_SECRET = process.env.JWT_SECRET || 'your_fallback_super_secret_key';
 
+
+
 // ORACLE DATE FORMATTER
 const formatter = new Intl.DateTimeFormat('en-GB', {
     day: 'numeric',
@@ -34,6 +36,7 @@ const formatOracleDate = (date) =>
 
 router.post('/login-direct', async (req, res) => {
     let { username, password } = req.body;
+    let useremail = username;
 
     // 1. Check if username or password are empty strings
     if (!username || !password) {
@@ -48,7 +51,7 @@ router.post('/login-direct', async (req, res) => {
     const domain = '@perodua.com.my';
 
     if (!username.toLowerCase().endsWith(domain)) {
-        username = `${username}${domain}`;
+        useremail = `${username}${domain}`;
     }
 
     const pass_decrypt = password;
@@ -59,8 +62,8 @@ router.post('/login-direct', async (req, res) => {
         connectTimeout: 5000
     });
     try {
-        await client.bind(username, pass_decrypt);
-        console.log(`Direct LDAP login successful for: ${username}`);
+        await client.bind(useremail, pass_decrypt);
+        console.log(`Direct LDAP login successful for: ${useremail}`);
 
         const { searchEntries } = await client.search(
             'DC=perodua,DC=com,DC=my',
@@ -74,10 +77,65 @@ router.post('/login-direct', async (req, res) => {
         // Close connection before sending successful response
         await client.unbind();
 
+        // --- NESTED ORACLE AUTOMATIC INSERTION ---
+        let conn;
+        try {
+            const pool = await getOraclePool();
+            conn = await pool.getConnection();
+
+            // Replace with your actual table and column structure
+            await conn.execute(
+                `INSERT INTO bma_login_audit_trail (
+                    username, 
+                    login_date, 
+                    status
+                 ) VALUES (
+                    :username, 
+                    SYSDATE, 
+                    :status
+                 )`,
+                {
+                    username: username,
+                    status: 'SUCCESS'
+                }
+            );
+
+            await conn.commit();
+            console.log(`[Oracle] Login successfully audited for user: ${username}`);
+        } catch (dbErr) {
+            // Log the error but don't crash the request; the user successfully authenticated via LDAP
+            console.error('Oracle database auto-insert failed, skipping audit record:', dbErr.message || dbErr);
+            if (conn) {
+                try { await conn.rollback(); } catch (rbErr) { console.error('Oracle rollback failed:', rbErr.message); }
+            }
+        } finally {
+            if (conn) {
+                try { await conn.close(); } catch (closeErr) { console.error('Error closing Oracle connection:', closeErr.message); }
+            }
+        }
+
+        // Ensure searchEntries exists and has elements
+        const userObj = searchEntries && searchEntries.length > 0 ? searchEntries[0] : null;
+
+        // Handle array vs string formats depending on your ldapts configuration
+        let displayName = "User"; // fallback default
+
+        if (userObj) {
+            if (Array.isArray(userObj.cn)) {
+                displayName = userObj.cn[0]; // Take first item if it's an array
+            } else if (typeof userObj.cn === 'string') {
+                displayName = userObj.cn;
+            }
+        }
+
         return res.json({
             success: true,
             message: 'Login successful',
-            user: searchEntries
+            // user: searchEntries
+            user: {
+                email: username,
+                name: displayName // Your mobile frontend can map directly to 'name'
+            }
         });
 
     } catch (err) {
