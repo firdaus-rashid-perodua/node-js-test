@@ -34,6 +34,41 @@ const formatOracleDate = (date) =>
     formatter.format(date).replace(/[\s,]+/g, '-').toUpperCase();
 // END ORACLE DATE FORMATTER
 
+
+// Reusable helper function to log login audit records safely
+async function logAuditTrail(username, status) {
+    let conn;
+    try {
+        const pool = await getOraclePool();
+        conn = await pool.getConnection();
+
+        await conn.execute(
+            `INSERT INTO bma_login_audit_trail (
+                username, 
+                login_date, 
+                status
+             ) VALUES (
+                :username, 
+                SYSDATE, 
+                :status
+             )`,
+            { username, status }
+        );
+
+        await conn.commit();
+        console.log(`[Oracle] Login successfully audited (${status}) for user: ${username}`);
+    } catch (dbErr) {
+        console.error(`Oracle database auto-insert failed, skipping audit record (${status}):`, dbErr.message || dbErr);
+        if (conn) {
+            try { await conn.rollback(); } catch (rbErr) { console.error('Oracle rollback failed:', rbErr.message); }
+        }
+    } finally {
+        if (conn) {
+            try { await conn.close(); } catch (closeErr) { console.error('Error closing Oracle connection:', closeErr.message); }
+        }
+    }
+}
+
 router.post('/login-direct', async (req, res) => {
     let { username, password } = req.body;
     let useremail = username;
@@ -56,6 +91,49 @@ router.post('/login-direct', async (req, res) => {
 
     const pass_decrypt = password;
 
+    //ORACLE user checking
+    // --- PRE-LDAP ORACLE USER CHECK ---
+    let dbCheckConn;
+    try {
+        const pool = await getOraclePool();
+        dbCheckConn = await pool.getConnection();
+
+        const checkResult = await dbCheckConn.execute(
+            `SELECT 1
+             FROM bma_users
+             WHERE upper(user_email) = upper(:useremail)
+             AND record_status = 'E'`,
+            { useremail: useremail }
+        );
+
+        // If no rows are returned, the user is invalid or not active
+        if (!checkResult.rows || checkResult.rows.length === 0) {
+            console.warn(`[Oracle] Blocked login attempt: User '${username}' not found or inactive.`);
+
+            // Log FAILED status to audit trail
+            await logAuditTrail(username, 'UNREGISTERED');
+
+            return res.status(401).json({
+                success: false,
+                message: 'User account not registered in PRIME GO.'
+            });
+        }
+
+        console.log(`[Oracle] User '${username}' verified successfully as PRIMEGO users.`);
+    } catch (dbErr) {
+        console.error('Oracle database user existence check failed:', dbErr.message || dbErr);
+        return res.status(500).json({
+            success: false,
+            message: 'Database error during user verification'
+        });
+    } finally {
+        if (dbCheckConn) {
+            try { await dbCheckConn.close(); } catch (closeErr) { console.error('Error closing Oracle connection:', closeErr.message); }
+        }
+    }
+
+
+    //LDAP Start
     const client = new Client({
         url: 'ldap://perodua.com.my',
         imeout: 5000,          // Prevents the request from hanging forever if LDAP is down
@@ -63,7 +141,7 @@ router.post('/login-direct', async (req, res) => {
     });
     try {
         await client.bind(useremail, pass_decrypt);
-        console.log(`Direct LDAP login successful for: ${useremail}`);
+        console.log(`[LDAP] Direct LDAP login successful for: ${useremail}`);
 
         const { searchEntries } = await client.search(
             'DC=perodua,DC=com,DC=my',
@@ -77,42 +155,8 @@ router.post('/login-direct', async (req, res) => {
         // Close connection before sending successful response
         await client.unbind();
 
-        // --- NESTED ORACLE AUTOMATIC INSERTION ---
-        let conn;
-        try {
-            const pool = await getOraclePool();
-            conn = await pool.getConnection();
-
-            // Replace with your actual table and column structure
-            await conn.execute(
-                `INSERT INTO bma_login_audit_trail (
-                    username, 
-                    login_date, 
-                    status
-                 ) VALUES (
-                    :username, 
-                    SYSDATE, 
-                    :status
-                 )`,
-                {
-                    username: username,
-                    status: 'SUCCESS'
-                }
-            );
-
-            await conn.commit();
-            console.log(`[Oracle] Login successfully audited for user: ${username}`);
-        } catch (dbErr) {
-            // Log the error but don't crash the request; the user successfully authenticated via LDAP
-            console.error('Oracle database auto-insert failed, skipping audit record:', dbErr.message || dbErr);
-            if (conn) {
-                try { await conn.rollback(); } catch (rbErr) { console.error('Oracle rollback failed:', rbErr.message); }
-            }
-        } finally {
-            if (conn) {
-                try { await conn.close(); } catch (closeErr) { console.error('Error closing Oracle connection:', closeErr.message); }
-            }
-        }
+        // --- SUCCESSFUL LOGIN AUDIT ---
+        await logAuditTrail(username, 'SUCCESS');
 
         // Ensure searchEntries exists and has elements
         const userObj = searchEntries && searchEntries.length > 0 ? searchEntries[0] : null;
@@ -140,6 +184,9 @@ router.post('/login-direct', async (req, res) => {
 
     } catch (err) {
         console.error('Invalid credentials or LDAP connection error:', err.message || err);
+
+        // --- FAILED LDAP LOGIN AUDIT ---
+        await logAuditTrail(username, 'FAILED');
 
         // 5. Attempt clean unbind layout inside catch block to avoid unhandled crashes
         try {
