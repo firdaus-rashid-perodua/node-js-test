@@ -142,13 +142,16 @@ router.post('/login-direct', async (req, res) => {
     try {
         await client.bind(useremail, pass_decrypt);
         console.log(`[LDAP] Direct LDAP login successful for: ${useremail}`);
+        const ldapFilter = `(|(mail=${username})(mail=${username}@perodua.com.my)(sAMAccountName=${username}))`;
+
 
         const { searchEntries } = await client.search(
             'DC=perodua,DC=com,DC=my',
             {
                 scope: 'sub',
                 //filter: '(sAMAccountName=firdaus.rashid)',
-                filter: `(mail=${username})`,
+                // filter: `(mail=${username})`,
+                filter: ldapFilter, // 👈 Change this line to use the variable!
             }
         );
 
@@ -164,11 +167,22 @@ router.post('/login-direct', async (req, res) => {
         // Handle array vs string formats depending on your ldapts configuration
         let displayName = "User"; // fallback default
 
+        // if (userObj) {
+        //     if (Array.isArray(userObj.cn)) {
+        //         displayName = userObj.cn[0]; // Take first item if it's an array
+        //     } else if (typeof userObj.cn === 'string') {
+        //         displayName = userObj.cn;
+        //     }
+        // }
+
         if (userObj) {
-            if (Array.isArray(userObj.cn)) {
-                displayName = userObj.cn[0]; // Take first item if it's an array
-            } else if (typeof userObj.cn === 'string') {
-                displayName = userObj.cn;
+            // 1. Check 'displayName' first (This holds "Ahmad Firdaus Bin Abd Rashid")
+            const nameAttribute = userObj.displayName || userObj.cn;
+
+            if (Array.isArray(nameAttribute)) {
+                displayName = nameAttribute[0]; // Take first item if it's an array
+            } else if (typeof nameAttribute === 'string') {
+                displayName = nameAttribute;
             }
         }
 
@@ -176,10 +190,10 @@ router.post('/login-direct', async (req, res) => {
             success: true,
             message: 'Login successful',
             // user: searchEntries
-            user: {
+            user: [{
                 email: username,
                 name: displayName // Your mobile frontend can map directly to 'name'
-            }
+            }]
         });
 
     } catch (err) {
@@ -291,13 +305,59 @@ router.get('/test/get-users', async (req, res) => {
 
 
 // start BMA (PRIME-GO) query
+router.get('/api/dashboard/ack_registration', async (req, res) => {
+    try {
+
+        const { month, year } = req.query;
+
+        const parsedMonth = month || '05';
+        const parsedYear = year || '2025';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+SELECT 
+    NVL(MAX(status), 'ACK') AS status,
+    NVL(SUM(TO_NUMBER(doc_total)), 0) AS amount
+FROM vsales.SNDSV_JPJ_MONITORING
+WHERE doc_type = 'EDAFTAR'
+  AND status = 'ACK'
+  AND created_date >= TRUNC(SYSDATE)
+  AND created_date < TRUNC(SYSDATE) + 1
+            `,
+            [],
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
+});
+
+
 router.get('/api/dashboard/year_regActual', async (req, res) => {
+
+    const { year } = req.query;
+    const parsedYear = year || '2025';
+
     try {
         const startTime = performance.now();
         const pool = await getMssqlPool();
-        const result = await pool.request().query(`SELECT COUNT(*) as 'total_reg_year'
+        const result = await pool.request().input('yearParam', parseInt(parsedYear)).query(`SELECT COUNT(*) as 'total_reg_year'
     FROM [DM_BRONZE].[CRKPI].[CRMDB_New_Car_Reg]
-    WHERE YEAR(REG_DATE) = '2025'`);
+    WHERE YEAR(REG_DATE) = @yearParam`);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2);
 
@@ -319,13 +379,17 @@ router.get('/api/dashboard/year_regActual', async (req, res) => {
 });
 
 
-router.get('/api/dashboard/year_regTarget', async (req, res) => {
+router.get('/api/dashboard/year_regTarget2', async (req, res) => {
+
+    const { year } = req.query;
+    const parsedYear = year || '2025';
+
     try {
         const startTime = performance.now();
         const pool = await getMssqlPool();
-        const result = await pool.request().query(`SELECT SUM(Target) as 'target_reg_year'
+        const result = await pool.request().input('yearParam', parseInt(parsedYear)).query(`SELECT SUM(Target) as 'target_reg_year'
     FROM [DM_BRONZE].[CRKPI].[FlatFile_Target]
-    WHERE  YEAR = '2025'
+    WHERE  YEAR = @yearParam
     AND Parameter = 'New Car Reg'`);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2);
@@ -344,6 +408,45 @@ router.get('/api/dashboard/year_regTarget', async (req, res) => {
         });
     }
 
+});
+
+router.get('/api/dashboard/year_regTarget', async (req, res) => {
+    try {
+
+        const { year } = req.query;
+        const parsedYear = year || '2025';
+
+
+        const startTime = performance.now();
+        const pool = await getOraclePool();   // pool object
+        const conn = await pool.getConnection();
+        const result = await conn.execute(`
+SELECT to_number(sectionvalue) as target_reg_year
+FROM bma_configuration_master
+WHERE configtype = 'YRLY_TARGT'
+and sectionname = 'YEAR_REG_TARGET'
+and recordstatus = 'E'
+and attr1 = :year
+            `,
+            {
+                year: parsedYear
+            },
+            { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        await conn.close();
+        const duration = (performance.now() - startTime).toFixed(2);
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/ack_registration  Params: " + JSON.stringify(req.query));
+
+        //res.json(result.rows);
+        res.status(200).json({
+            success: true,
+            count: result.rows.length,
+            data: result.rows
+        });
+    } catch (err) {
+        console.error('Oracle error:', err);
+        res.status(500).json({ error: err + '. Oracle query failed' });
+    }
 });
 
 
@@ -1361,7 +1464,7 @@ FROM (
 
 
 //booking target
-router.get('/api/dashboard/mnt_bkgTarget', async (req, res) => {
+router.get('/api/dashboard/mnt_bkgTarget2', async (req, res) => {
     try {
 
         const { month, year } = req.query;
@@ -1404,9 +1507,7 @@ router.get('/api/dashboard/mnt_bkgTarget', async (req, res) => {
 });
 
 
-
-//booking List
-router.get('/api/booking/mnt_ListActual2', async (req, res) => {
+router.get('/api/dashboard/mnt_bkgTarget', async (req, res) => {
     try {
 
         // 1. Get query parameters from the request URL
@@ -1423,35 +1524,90 @@ router.get('/api/booking/mnt_ListActual2', async (req, res) => {
         const pool = await getMssqlPool();
         const result = await pool.request().input('monthParam', parseInt(parsedMonth))
             .input('yearParam', parseInt(parsedYear)).query(`
-WITH CombinedBookings AS (
-    -- 1. Dealer Bookings
-    SELECT 
-        TR2.compcode AS center_code, 
-        OTL2.REGION_2--,OTL2.REGION
-    FROM DM_BRONZE.crkpi.[CRMDB_Booking_Dealer] TR2 
-    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
-        ON TR2.compcode = OTL2.SLS_CODE 
-    WHERE MONTH(TR2.BOOKINGDATE) = @monthParam
-        AND YEAR(TR2.BOOKINGDATE) = @yearParam
+SELECT ISNULL(SUM(Target), 0) as 'TARGET_BKG_MONTH'
+FROM [DM_BRONZE].[CRKPI].[FlatFile_Target]
+WHERE YEAR = @yearParam
+  AND MONTH = @monthParam
+  --AND REGION = 'C1'
+  AND Parameter = 'Booking'
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2)
 
-    UNION ALL -- Use UNION ALL to make sure you count every single row
 
-    -- 2. Branch Bookings
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/dashboard/mnt_bkgTarget  Params: " + JSON.stringify(req.query));
+        res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        });
+    } catch (err) {
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] failed: /api/dashboard/mnt_bkgTarget " + err.message);
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+//booking List
+router.get('/api/booking/mnt_ListActual', async (req, res) => {
+    try {
+
+        // 1. Get query parameters from the request URL
+        const { month, year } = req.query;
+
+        // Fallback defaults if parameters are missing from the URL call
+        // const queryMonth = month || '05';
+        // const queryYear = year || '2025';
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+
+        // To calculate query time taken
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).query(`
+WITH TargetData AS (
     SELECT 
-        ACT1.sales_center_code AS center_code, 
-        OTL2.REGION_2--,OTL2.REGION
-    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] ACT1
+        OTL2.Region_2 AS [REGION],
+        SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_BKG_COUNT
+    FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
     JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
-        ON ACT1.sales_center_code = OTL2.SLS_CODE 
-    WHERE ACT1.BOOKING_STATUS = 'BOOK'
-        AND MONTH(ACT1.BOOKING_DATE) = @monthParam
-        AND YEAR(ACT1.BOOKING_DATE) = @yearParam
+        ON TR2.[Outlet Code] = OTL2.SLS_CODE 
+    WHERE TR2.Parameter = 'Booking' 
+      AND TR2.Month = @monthParam 
+      AND TR2.Year = @yearParam
+    GROUP BY OTL2.Region_2
+),
+ActualDataBr AS (
+    SELECT OTL2.Region_2 AS [REGION],
+           COUNT(*) AS ACTUAL_BKG_COUNT_BR
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] AC2
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE 
+    WHERE MONTH(AC2.BOOKING_DATE) = @monthParam
+      AND YEAR(AC2.BOOKING_DATE) = @yearParam
+    GROUP BY OTL2.Region_2
+),
+ActualDataDlr AS (
+    SELECT OTL2.Region_2 AS [REGION],
+           COUNT(*) AS ACTUAL_BKG_COUNT_DLR
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer] AC2
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON AC2.COMPCODE = OTL2.SLS_CODE 
+    WHERE MONTH(AC2.BOOKINGDATE) = @monthParam
+      AND YEAR(AC2.BOOKINGDATE) = @yearParam
+    GROUP BY OTL2.Region_2
 )
--- 3. Final Aggregation
 SELECT 
-    REGION_2 as 'REGION',
-        -- New Descriptive Region Column (Added FMD label map)
-    CASE ISNULL(REGION_2, REGION_2)
+    -- Resolves region across all three tables
+    COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) AS [REGION],
+    
+    CASE COALESCE(t.[REGION], br.[REGION], dlr.[REGION])
         WHEN 'C1'  THEN 'Central 1'
         WHEN 'C2'  THEN 'Central 2'
         WHEN 'EC1' THEN 'East Coast 1'
@@ -1459,15 +1615,44 @@ SELECT
         WHEN 'EM'  THEN 'East Malaysia'
         WHEN 'N'   THEN 'Northern'
         WHEN 'S'   THEN 'Southern'
-        WHEN 'FMD' THEN 'FMD' -- Maps code to descriptive name
-        ELSE ISNULL(REGION_2, REGION_2)
+        WHEN 'FMD' THEN 'FMD'
+        ELSE COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) 
     END AS REGION_NAME,
-    COUNT(center_code) AS 'ACTUAL_BKG_COUNT'
-FROM CombinedBookings
-GROUP BY REGION_2--, REGION
+
+    ISNULL(t.TARGET_BKG_COUNT, 0) AS TARGET_BKG_COUNT,
+    ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) AS ACTUAL_BKG_COUNT_BR,
+    ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0) AS ACTUAL_BKG_COUNT_DLR,
+    
+    -- Combined Total Actuals (Branch + Dealer)
+    (ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) AS ACTUAL_BKG_COUNT,
+    
+    -- 1. No Decimal Places (rounded using combined actuals)
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0
+        ELSE CAST(ROUND(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
+    END AS BKG_PCTG,
+
+    -- 2. One Decimal Place
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.0
+        ELSE CAST(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
+    END AS BKG_PCTG_1,
+
+    -- 3. Two Decimal Places
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.00
+        ELSE CAST(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
+    END AS BKG_PCTG_2
+
+FROM TargetData t
+FULL OUTER JOIN ActualDataBr br 
+    ON t.[REGION] = br.[REGION]
+FULL OUTER JOIN ActualDataDlr dlr 
+    ON COALESCE(t.[REGION], br.[REGION]) = dlr.[REGION]
+
 ORDER BY 
-    CASE WHEN REGION_2 = 'FMD' THEN 1 ELSE 0 END ASC,
-    REGION_2 ASC;;
+    CASE WHEN COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) = 'FMD' THEN 1 ELSE 0 END ASC, 
+    COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) ASC;
 `);
         //res.json(result.recordset);
         const duration = (performance.now() - startTime).toFixed(2)
@@ -1490,7 +1675,7 @@ ORDER BY
 
 });
 
-router.get('/api/booking/mnt_ListActual', async (req, res) => {
+router.get('/api/booking/mnt_ListActualx', async (req, res) => {
     let oracleConn;
     try {
         const { month, year } = req.query;
@@ -1804,7 +1989,141 @@ ORDER BY region
 });
 
 
+router.get('/api/booking/mnt_listRegionOutlet', async (req, res) => {
+    try {
+        const { month, year, region } = req.query;
 
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedRegion = region || 'C1';
+
+        // console.log(parsedRegion);
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).input('regionParam', parsedRegion).query(`
+WITH TargetData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        TR2.[Outlet Code] AS OUTLET_CODE,
+        SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_BKG_COUNT
+    FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON TR2.[Outlet Code] = OTL2.SLS_CODE 
+    WHERE TR2.Parameter = 'New Car Reg' 
+      AND TR2.Month = @monthParam
+      AND TR2.Year = @yearParam
+      AND OTL2.OUTLET_ACTIVE = 'Active'
+      AND OTL2.REGION_2 = @regionParam
+    GROUP BY OTL2.Region_2, TR2.[Outlet Code]
+),
+ActualDataBr AS (
+    SELECT OTL2.Region_2 AS [REGION],
+           OTL2.SLS_CODE AS OUTLET_CODE,
+           OTL2.SLS_COMP_NAME AS OUTLET_NAME,
+           COUNT(*) AS ACTUAL_BKG_COUNT_BR
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] AC2
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE 
+    WHERE MONTH(AC2.BOOKING_DATE) = @monthParam
+      AND YEAR(AC2.BOOKING_DATE) = @yearParam
+      AND OTL2.REGION_2 = @regionParam
+    GROUP BY OTL2.Region_2, OTL2.SLS_CODE, OTL2.SLS_COMP_NAME
+),
+ActualDataDlr AS (
+    SELECT OTL2.Region_2 AS [REGION],
+           OTL2.SLS_CODE AS OUTLET_CODE,
+           OTL2.SLS_COMP_NAME AS OUTLET_NAME,
+           COUNT(*) AS ACTUAL_BKG_COUNT_DLR
+    FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer] AC2
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON AC2.COMPCODE = OTL2.SLS_CODE 
+    WHERE MONTH(AC2.BOOKINGDATE) = @monthParam
+      AND YEAR(AC2.BOOKINGDATE) = @yearParam
+      AND OTL2.REGION_2 = @regionParam
+    GROUP BY OTL2.Region_2, OTL2.SLS_CODE, OTL2.SLS_COMP_NAME
+)
+SELECT 
+    -- Resolves region and outlet attributes safely across targets and actuals
+    COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) AS [REGION],
+    COALESCE(t.OUTLET_CODE, br.OUTLET_CODE, dlr.OUTLET_CODE) AS OUTLET_CODE,
+    COALESCE(br.OUTLET_NAME, dlr.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
+    
+    ISNULL(t.TARGET_BKG_COUNT, 0) AS TARGET_BKG_COUNT,
+    ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) AS ACTUAL_BKG_COUNT_BR,
+    ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0) AS ACTUAL_BKG_COUNT_DLR,
+
+    -- Combined sum of branch and dealer bookings
+    (ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) AS ACTUAL_BKG_COUNT,
+    -- 1. No Decimal Places (rounded using combined total)
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0
+        ELSE CAST(ROUND(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
+    END AS BKG_PCTG,
+    -- 2. One Decimal Place
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.0
+        ELSE CAST(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
+    END AS BKG_PCTG_1,
+    -- 3. Two Decimal Places
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.00
+        ELSE CAST(((ISNULL(br.ACTUAL_BKG_COUNT_BR, 0) + ISNULL(dlr.ACTUAL_BKG_COUNT_DLR, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
+    END AS BKG_PCTG_2
+FROM TargetData t
+FULL OUTER JOIN ActualDataBr br 
+    ON t.OUTLET_CODE = br.OUTLET_CODE
+FULL OUTER JOIN ActualDataDlr dlr 
+    ON COALESCE(t.OUTLET_CODE, br.OUTLET_CODE) = dlr.OUTLET_CODE
+ORDER BY BKG_PCTG_2 DESC;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        // To change 'Veh Br - ' to 'PSSB' 
+        const updatedRecords = result.recordset.map(item => {
+            if (item.OUTLET_NAME && item.OUTLET_NAME.startsWith('Veh Br-')) {
+                return {
+                    ...item,
+                    OUTLET_NAME: item.OUTLET_NAME.replace('Veh Br-', 'PSSB ')
+                };
+            }
+            return item;
+        });
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/booking/mnt_listRegionOutlet Params: " + JSON.stringify(req.query));
+
+
+
+
+        // Ori
+        /* res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        }); */
+
+
+        // Modified JSON
+        res.status(200).json({
+            success: true,
+            count: updatedRecords.length,
+            data: updatedRecords
+        });
+
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+/*
 router.get('/api/booking/mnt_listRegionOutlet_ora', async (req, res) => {
     try {
 
@@ -1866,9 +2185,250 @@ ORDER BY ACTUAL_BKG_COUNT DESC
         res.status(500).json({ error: err + '. Oracle query failed' });
     }
 });
+*/
+
+router.get('/api/booking/mnt_listModelOutlet', async (req, res) => {
+    try {
+        const { month, year, region, outletcode } = req.query;
+
+        const parsedMonth = parseInt(month, 10) || '05';
+        const parsedYear = parseInt(year, 10) || '2025';
+        const parsedRegion = region || 'C1';
+        const parsedOutletCode = outletcode || '522105';
+
+        // console.log(parsedRegion);
+
+        const startTime = performance.now();
+        const pool = await getMssqlPool();
+        const result = await pool.request().input('monthParam', parseInt(parsedMonth))
+            .input('yearParam', parseInt(parsedYear)).input('regionParam', parsedRegion).input('outletCodeParam', parsedOutletCode).query(`
+WITH TargetData AS (
+    SELECT 
+        OTL2.Region_2 AS [REGION],
+        TR2.[Outlet Code] AS OUTLET_CODE,
+        TR2.Model AS [MODEL],
+        SUM(TRY_CAST(TR2.Target AS INT)) AS TARGET_BKG_COUNT
+    FROM DM_BRONZE.crkpi.FlatFile_Target TR2 
+    JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 
+        ON TR2.[Outlet Code] = OTL2.SLS_CODE 
+    WHERE TR2.Parameter = 'Booking' 
+      AND TR2.Month = @monthParam
+      AND TR2.Year = @yearParam
+      AND OTL2.OUTLET_ACTIVE = 'Active'
+      AND TR2.[Outlet Code] = @outletCodeParam
+      AND TR2.Model <> 'AXIA E'
+    GROUP BY OTL2.Region_2, TR2.[Outlet Code], TR2.Model
+),
+ActualDataBr AS (
+    SELECT 
+        t.[REGION],
+        t.OUTLET_CODE,
+        t.[MODEL],
+        ISNULL((
+            SELECT TOP 1 OTL2.SLS_COMP_NAME
+            FROM DM_GOLD.crkpi.OUTLET_TYPE OTL2
+            WHERE OTL2.SLS_CODE = t.OUTLET_CODE
+        ), 'No Name Registered') AS OUTLET_NAME,
+        (
+            SELECT COUNT(*) 
+            FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Branch] AC2
+            JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 ON AC2.SALES_CENTER_CODE = OTL2.SLS_CODE
+            WHERE MONTH(AC2.BOOKING_DATE) = TRY_CAST(@monthParam AS INT)
+              AND YEAR(AC2.BOOKING_DATE) = TRY_CAST(@yearParam AS INT)
+              AND AC2.SALES_CENTER_CODE = t.OUTLET_CODE
+              -- Modify or remove model matching rule below if your branch table uses a different column
+            AND AC2.VML_MANUFACTURING_CODE IN (
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD3GZ'
+                      WHEN 'ALZA' THEN 'BP5HZ'
+                      WHEN 'AXIA' THEN 'CG1XZ'
+                      WHEN 'BEZZA' THEN 'AQ1GZ2'
+                      WHEN 'ARUZ' THEN 'W5XZ2'
+                      WHEN 'ATIVA' THEN 'U1XZ'
+                      WHEN 'TRAZ' THEN 'Y5XZ'
+                      ELSE 'UNKNOWN'
+                  END,
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD3GZ1'
+                      WHEN 'ALZA' THEN 'BP5VZ'
+                      WHEN 'AXIA' THEN 'CG1SZ'
+                      WHEN 'BEZZA' THEN 'AQ1GX2'
+                      WHEN 'ARUZ' THEN 'W5VZ1'
+                      WHEN 'ATIVA' THEN 'U1HZ'
+                      WHEN 'TRAZ' THEN 'Y5HZ'
+                      ELSE 'UNKNOWN'
+                  END,
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD5XZ'
+                      WHEN 'ALZA' THEN 'BP5XZ'
+                      WHEN 'AXIA' THEN 'CG1GZ'
+                      WHEN 'BEZZA' THEN 'AQ3XZ1'
+                      WHEN 'ARUZ' THEN 'W5VZ2'
+                      WHEN 'ATIVA' THEN 'U1VZ'
+                      ELSE 'UNKNOWN'
+                  END,
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD5VZ'
+                      WHEN 'AXIA' THEN 'CG1VZ'
+                      WHEN 'BEZZA' THEN 'AQ3VZ1'
+                      ELSE 'UNKNOWN'
+                  END,
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD5VZ'
+                      ELSE 'UNKNOWN'
+                  END
+              )
+        ) AS REG_COUNT
+    FROM TargetData t
+),
+ActualDataDlr AS (
+    SELECT 
+        t.[REGION],
+        t.OUTLET_CODE,
+        t.[MODEL],
+        ISNULL((
+            SELECT TOP 1 OTL2.SLS_COMP_NAME
+            FROM DM_GOLD.crkpi.OUTLET_TYPE OTL2
+            WHERE OTL2.SLS_CODE = t.OUTLET_CODE
+        ), 'No Name Registered') AS OUTLET_NAME,
+        (
+            SELECT COUNT(*) 
+            FROM [DM_BRONZE].[CRKPI].[CRMDB_Booking_Dealer] AC2
+            JOIN DM_GOLD.crkpi.OUTLET_TYPE OTL2 ON AC2.COMPCODE = OTL2.SLS_CODE
+            WHERE MONTH(AC2.BOOKINGDATE) = TRY_CAST(@monthParam AS INT)
+              AND YEAR(AC2.BOOKINGDATE) = TRY_CAST(@yearParam AS INT)
+              AND AC2.COMPCODE = t.OUTLET_CODE
+              -- Modify or remove model matching rule below if your dealer table uses a different column
+            AND AC2.VML_MANUFACTURING_CODE IN (
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD3GZ'
+                      WHEN 'ALZA' THEN 'BP5HZ'
+                      WHEN 'AXIA' THEN 'CG1XZ'
+                      WHEN 'BEZZA' THEN 'AQ1GZ2'
+                      WHEN 'ARUZ' THEN 'W5XZ2'
+                      WHEN 'ATIVA' THEN 'U1XZ'
+                      WHEN 'TRAZ' THEN 'Y5XZ'
+                      ELSE 'UNKNOWN'
+                  END,
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD3GZ1'
+                      WHEN 'ALZA' THEN 'BP5VZ'
+                      WHEN 'AXIA' THEN 'CG1SZ'
+                      WHEN 'BEZZA' THEN 'AQ1GX2'
+                      WHEN 'ARUZ' THEN 'W5VZ1'
+                      WHEN 'ATIVA' THEN 'U1HZ'
+                      WHEN 'TRAZ' THEN 'Y5HZ'
+                      ELSE 'UNKNOWN'
+                  END,
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD5XZ'
+                      WHEN 'ALZA' THEN 'BP5XZ'
+                      WHEN 'AXIA' THEN 'CG1GZ'
+                      WHEN 'BEZZA' THEN 'AQ3XZ1'
+                      WHEN 'ARUZ' THEN 'W5VZ2'
+                      WHEN 'ATIVA' THEN 'U1VZ'
+                      ELSE 'UNKNOWN'
+                  END,
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD5VZ'
+                      WHEN 'AXIA' THEN 'CG1VZ'
+                      WHEN 'BEZZA' THEN 'AQ3VZ1'
+                      ELSE 'UNKNOWN'
+                  END,
+                  CASE t.[MODEL]
+                      WHEN 'MYVI' THEN 'BD5VZ'
+                      ELSE 'UNKNOWN'
+                  END
+              )
+        ) AS REG_COUNT
+    FROM TargetData t
+)
+SELECT 
+    COALESCE(t.[REGION], br.[REGION], dlr.[REGION]) AS [REGION],
+    COALESCE(t.OUTLET_CODE, br.OUTLET_CODE, dlr.OUTLET_CODE) AS OUTLET_CODE,
+    COALESCE(br.OUTLET_NAME, dlr.OUTLET_NAME, 'No Name Registered') AS OUTLET_NAME,
+    COALESCE(t.[MODEL], br.[MODEL], dlr.[MODEL]) AS [MODEL],
+    
+    ISNULL(t.TARGET_BKG_COUNT, 0) AS TARGET_BKG_COUNT,
+    ISNULL(br.REG_COUNT, 0) AS ACTUAL_BKG_COUNT_BR,
+    ISNULL(dlr.REG_COUNT, 0) AS ACTUAL_BKG_COUNT_DLR,
+    
+    -- Combined Branch + Dealer booking counts
+    (ISNULL(br.REG_COUNT, 0) + ISNULL(dlr.REG_COUNT, 0)) AS ACTUAL_BKG_COUNT,
+    
+    -- 1. No Decimal Places
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0
+        ELSE CAST(ROUND(((ISNULL(br.REG_COUNT, 0) + ISNULL(dlr.REG_COUNT, 0)) * 100.0) / t.TARGET_BKG_COUNT, 0) AS INT)
+    END AS BKG_PCTG,
+
+    -- 2. One Decimal Place
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.0
+        ELSE CAST(((ISNULL(br.REG_COUNT, 0) + ISNULL(dlr.REG_COUNT, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,1))
+    END AS BKG_PCTG_1,
+
+    -- 3. Two Decimal Places
+    CASE 
+        WHEN ISNULL(t.TARGET_BKG_COUNT, 0) = 0 THEN 0.00
+        ELSE CAST(((ISNULL(br.REG_COUNT, 0) + ISNULL(dlr.REG_COUNT, 0)) * 100.0) / t.TARGET_BKG_COUNT AS DECIMAL(10,2))
+    END AS BKG_PCTG_2
+
+FROM TargetData t
+FULL OUTER JOIN ActualDataBr br 
+    ON t.OUTLET_CODE = br.OUTLET_CODE AND t.[MODEL] = br.[MODEL]
+FULL OUTER JOIN ActualDataDlr dlr 
+    ON COALESCE(t.OUTLET_CODE, br.OUTLET_CODE) = dlr.OUTLET_CODE 
+   AND COALESCE(t.[MODEL], br.[MODEL]) = dlr.[MODEL]
+
+ORDER BY BKG_PCTG_2 DESC;
+`);
+        //res.json(result.recordset);
+        const duration = (performance.now() - startTime).toFixed(2);
+
+        // To change 'Veh Br - ' to 'PSSB' 
+        const updatedRecords = result.recordset.map(item => {
+            if (item.OUTLET_NAME && item.OUTLET_NAME.startsWith('Veh Br-')) {
+                return {
+                    ...item,
+                    OUTLET_NAME: item.OUTLET_NAME.replace('Veh Br-', 'PSSB ')
+                };
+            }
+            return item;
+        });
+
+        console.log("[" + new Date().toISOString().replace('T', ' ').substring(0, 19) + "] success (" + duration + "ms): /api/registration/mnt_listModelOutlet Params: " + JSON.stringify(req.query));
 
 
 
+
+        // Ori
+        /* res.status(200).json({
+            success: true,
+            count: result.recordset.length,
+            data: result.recordset
+        }); */
+
+
+        // Modified JSON
+        res.status(200).json({
+            success: true,
+            count: updatedRecords.length,
+            data: updatedRecords
+        });
+
+    } catch (err) {
+        res.status(500).json({
+            success: false,
+            message: 'Database query execution failed',
+            error: err.message
+        });
+    }
+
+});
+
+
+/*
 router.get('/api/booking/mnt_listModelOutlet_ora', async (req, res) => {
     try {
 
@@ -1954,7 +2514,7 @@ ORDER BY actual_bkg_count DESC
         res.status(500).json({ error: err + '. Oracle query failed' });
     }
 });
-
+*/
 
 
 // end BMA (PRIME-GO) query
